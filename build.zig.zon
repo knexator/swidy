@@ -1,0 +1,12 @@
+.{
+    .name = .swidy,
+    .version = "0.0.0",
+    .fingerprint = 0xe1f662b35e387f6a, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
