@@ -6,19 +6,6 @@ const assert = std.debug.assert;
 
 // keep all fnks as values?
 
-pub fn add(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
-    switch (swidy.get(value)) {
-        .bytes => return 1,
-        .pair => return 2,
-    }
-    // return value;
-}
-
-comptime {
-    std.testing.refAllDecls(Swidy);
-    _ = add;
-}
-
 pub const Swidy = struct {
     slots_pairs: std.ArrayListUnmanaged(Value.Pair),
     slots_strings: std.ArrayListUnmanaged(Value.String),
@@ -142,8 +129,18 @@ pub const Swidy = struct {
     }
 
     pub fn eval(swidy: *Swidy, fnkname: Value, input: Value, known_fnks: Value) Value {
-        const fnkbody = swidy.lookup(fnkname, known_fnks) orelse swidy.buildString("nil");
-        return swidy.eval_inner(fnkbody, input, swidy.buildString("nil"), known_fnks);
+        if (fnkname.tag == .string and swidy.get(fnkname).string[0] == '@') {
+            const builtin_name = swidy.get(fnkname).string[1..];
+            inline for (@typeInfo(BuiltinFnks).@"struct".decls) |decl| {
+                if (std.mem.eql(u8, decl.name, builtin_name)) {
+                    const builtin = @field(BuiltinFnks, decl.name);
+                    return builtin(swidy, input);
+                }
+            } else unreachable;
+        } else {
+            const fnkbody = swidy.lookup(fnkname, known_fnks) orelse swidy.buildString("nil");
+            return swidy.eval_inner(fnkbody, input, swidy.buildString("nil"), known_fnks);
+        }
     }
 
     fn eval_inner(swidy: *Swidy, fnkbody: Value, input: Value, parent_bindings: Value, known_fnks: Value) Value {
@@ -347,6 +344,34 @@ pub const Swidy = struct {
     fn OoM() noreturn {
         std.debug.panic("OoM", .{});
     }
+
+    const BuiltinFnks = struct {
+        fn identity(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
+            _ = swidy;
+            return value;
+        }
+
+        fn @"equals?"(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
+            return switch (swidy.get(value)) {
+                .string => false,
+                .pair => |pair| swidy.buildString(
+                    if (swidy.eql(pair.left, pair.right))
+                        "true"
+                    else
+                        "false",
+                ),
+            };
+        }
+
+        // fn add_u8_u8(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
+        //     std.mem.readInt(comptime T: type, buffer: *const [?]u8, endian: Endian)
+        //     switch (swidy.get(value)) {
+        //         .bytes => return 1,
+        //         .pair => return 2,
+        //     }
+        //     return value;
+        // }
+    };
 };
 
 // (ffi "add" (23.0f 12.0f))
@@ -398,16 +423,66 @@ test "fnk" {
         var source: std.Io.Reader = .fixed(
             \\ (("myFunc" . (
             \\      ((("lit" . "a") . ("lit" . "b")) . (("lit" . "identity") . ()))
+            \\      ((("var" . "x") . (("var" . "x") . ("var" . "x"))) . (("lit" . "identity") . ()))
             \\ )))
         );
         break :blk try Swidy.Parser.sexpr(&swidy, &source);
     };
-    const input_value = swidy.buildString("a");
     const fnkname = swidy.buildString("myFunc");
 
-    const result = swidy.eval(fnkname, input_value, known_fnks);
+    if (true) {
+        const input_value = swidy.buildString("a");
+        const result = swidy.eval(fnkname, input_value, known_fnks);
+        try swidy.expectEqual(swidy.buildString("b"), result);
+    }
 
-    try swidy.expectEqual(swidy.buildString("b"), result);
+    if (true) {
+        const input_value = swidy.buildString("b");
+        const result = swidy.eval(fnkname, input_value, known_fnks);
+        try swidy.expectEqual(
+            swidy.buildPair(
+                swidy.buildString("b"),
+                swidy.buildString("b"),
+            ),
+            result,
+        );
+    }
+}
+
+test "builtins" {
+    var swidy: Swidy = .init(std.testing.allocator);
+    defer swidy.deinit();
+
+    const known_fnks: Swidy.Value = blk: {
+        var source: std.Io.Reader = .fixed(
+            \\ (("myFunc" . (
+            \\      ((("lit" . "a") . ("lit" . "b")) . (("lit" . "@identity") . ()))
+            \\      ((("lit" . "b") . (("lit" . "b") . ("lit" . "b"))) . (("lit" . "@equals?") . ()))
+            \\      ((("lit" . "c") . (("lit" . "b") . ("lit" . "c"))) . (("lit" . "@equals?") . ()))
+            \\ )))
+        );
+        break :blk try Swidy.Parser.sexpr(&swidy, &source);
+    };
+    const fnkname = swidy.buildString("myFunc");
+
+    if (true) {
+        const input_value = swidy.buildString("a");
+        const result = swidy.eval(fnkname, input_value, known_fnks);
+        try swidy.expectEqual(swidy.buildString("b"), result);
+    }
+
+    // TODO(now): investigate
+    if (true) {
+        const input_value = swidy.buildString("b");
+        const result = swidy.eval(fnkname, input_value, known_fnks);
+        try swidy.expectEqual(swidy.buildString("true"), result);
+    }
+
+    if (true) {
+        const input_value = swidy.buildString("c");
+        const result = swidy.eval(fnkname, input_value, known_fnks);
+        try swidy.expectEqual(swidy.buildString("false"), result);
+    }
 }
 
 // const source: std.io.Reader = .fixed(
