@@ -20,92 +20,125 @@ comptime {
 }
 
 pub const Swidy = struct {
-    tags: std.ArrayListUnmanaged(Tag),
-    cells: std.ArrayListUnmanaged(Value),
+    slots_pairs: std.ArrayListUnmanaged(Value.Pair),
+    slots_strings: std.ArrayListUnmanaged(Value.String),
     strings: std.ArrayListUnmanaged(u8),
 
     gpa: std.mem.Allocator,
 
     pub fn init(gpa: std.mem.Allocator) Swidy {
-        var result: Swidy = .{ .gpa = gpa, .tags = .empty, .cells = .empty, .strings = .empty };
-        assert(result.buildString("nil") == 0);
-        return result;
+        return .{ .gpa = gpa, .slots_pairs = .empty, .slots_strings = .empty, .strings = .empty };
     }
 
     pub fn deinit(swidy: *Swidy) void {
-        swidy.tags.deinit(swidy.gpa);
-        swidy.cells.deinit(swidy.gpa);
+        swidy.slots_pairs.deinit(swidy.gpa);
+        swidy.slots_strings.deinit(swidy.gpa);
         swidy.strings.deinit(swidy.gpa);
     }
 
+    pub fn eql(swidy: *const Swidy, a: Value, b: Value) bool {
+        return switch (swidy.get(a)) {
+            .string => |a_str| switch (swidy.get(b)) {
+                .pair => false,
+                .string => |b_str| std.mem.eql(u8, a_str, b_str),
+            },
+            .pair => |a_pair| switch (swidy.get(b)) {
+                .string => false,
+                .pair => |b_pair| swidy.eql(a_pair.left, b_pair.left) and
+                    swidy.eql(a_pair.right, b_pair.right),
+            },
+        };
+    }
+
+    pub fn expectEqual(swidy: *const Swidy, a: Value, b: Value) !void {
+        try std.testing.expect(swidy.eql(a, b));
+    }
+
     pub const Tag = enum(u1) { pair, string };
-    pub const Index = u32;
-    pub const Value = union {
-        pair: Pair,
-        string: String,
+    pub const Value = packed struct(u32) {
+        // TODO(perf-late): try swapping the order
+        tag: Tag,
+        index: u31,
 
         pub const Pair = struct {
-            left: Index,
-            right: Index,
+            left: Value,
+            right: Value,
         };
 
         pub const String = struct {
-            start: Index,
+            start: u32,
             len: u32,
         };
     };
 
-    pub fn get(swidy: *const Swidy, index: Index) union(enum) {
-        bytes: []const u8,
-        pair: struct { left: Index, right: Index },
+    pub fn get(swidy: *const Swidy, value: Value) union(enum) {
+        string: []const u8,
+        pair: struct { left: Value, right: Value },
     } {
-        switch (swidy.tags.items[index]) {
+        switch (value.tag) {
             .pair => {
-                const asdf = swidy.cells.items[index].pair;
+                const asdf = swidy.slots_pairs.items[value.index];
                 return .{ .pair = .{ .left = asdf.left, .right = asdf.right } };
             },
             .string => {
-                const asdf = swidy.cells.items[index].string;
-                return .{ .bytes = swidy.strings.items[asdf.start..][0..asdf.len] };
+                const asdf = swidy.slots_strings.items[value.index];
+                return .{ .string = swidy.strings.items[asdf.start..][0..asdf.len] };
             },
         }
     }
 
-    fn createCell(swidy: *Swidy, tag: Tag) Index {
-        assert(swidy.tags.items.len == swidy.cells.items.len);
-        swidy.tags.append(swidy.gpa, tag) catch OoM();
-        _ = swidy.cells.addOne(swidy.gpa) catch OoM();
-        assert(swidy.tags.items.len == swidy.cells.items.len);
-        return cast(swidy.cells.items.len - 1);
+    fn createCell(swidy: *Swidy, comptime tag: Tag) Value {
+        const slots = switch (tag) {
+            .pair => &swidy.slots_pairs,
+            .string => &swidy.slots_strings,
+        };
+        const result: Value = .{ .tag = tag, .index = std.math.cast(u31, slots.items.len) orelse OoM() };
+        _ = slots.addOne(swidy.gpa) catch OoM();
+        return result;
     }
 
     // TODO(perf): free and reuse cells
     // fn destroyCell
 
-    pub fn buildPair(swidy: *Swidy, left: Index, right: Index) Index {
+    pub fn buildPair(swidy: *Swidy, left: Value, right: Value) Value {
         const result = swidy.createCell(.pair);
-        swidy.cells.items[result].pair = .{ .left = left, .right = right };
+        swidy.slots_pairs.items[result.index] = .{ .left = left, .right = right };
         return result;
     }
 
-    pub fn buildString(swidy: *Swidy, bytes: []const u8) Index {
+    pub fn buildString(swidy: *Swidy, bytes: []const u8) Value {
         // TODO(perf): string interning
-        const string: Value.String = .{ .start = cast(swidy.strings.items.len), .len = cast(bytes.len) };
+        const string: Value.String = .{
+            .start = std.math.cast(u32, swidy.strings.items.len) orelse OoM(),
+            .len = std.math.cast(u32, bytes.len) orelse OoM(),
+        };
         swidy.strings.appendSlice(swidy.gpa, bytes) catch OoM();
 
         const result = swidy.createCell(.string);
-        swidy.cells.items[result].string = string;
+        swidy.slots_strings.items[result.index] = string;
         return result;
     }
 
-    // fn parseFnk(swidy: *Swidy, reader: *std.Io.Reader) !Index {
-    //     if (std.mem.eql(u8, "fn", ))
-    // }
+    fn buildList(swidy: *Swidy, elements: []const Value, sentinel: ?Value) Value {
+        var result = sentinel orelse swidy.buildString("nil");
+        var it = std.mem.reverseIterator(elements);
+        while (it.next()) |element| {
+            result = swidy.buildPair(element, result);
+        }
+        return result;
+    }
 
     const Parser = struct {
         fn expect(reader: *std.Io.Reader, expected: []const u8) !void {
-            const actual = try reader.take(expected.len);
-            if (!std.mem.eql(u8, actual, expected)) return error.BadInput;
+            if (!try eat(reader, expected)) return error.BadInput;
+        }
+
+        fn eat(reader: *std.Io.Reader, expected: []const u8) !bool {
+            const actual = try reader.peek(expected.len);
+            if (std.mem.eql(u8, actual, expected)) {
+                reader.toss(expected.len);
+                return true;
+            } else return false;
         }
 
         fn whitespace(reader: *std.Io.Reader, mandatory: bool) !void {
@@ -117,40 +150,60 @@ pub const Swidy = struct {
             if (mandatory and !seen_any) return error.BadInput;
         }
 
-        fn tree(swidy: *Swidy, reader: *std.Io.Reader) !Index {
+        // fn fnk(swidy: *Swidy, reader: *std.Io.Reader) !Index {
+        //     if (std.mem.eql(u8, "fn", ))
+        // }
+
+        // fn tree(swidy: *Swidy, reader: *std.Io.Reader) !Value {
+        //     try whitespace(reader, false);
+        //     if (reader.peekByte() == '(') {
+        //         @panic("TODO");
+        //     } else if (reader.peekByte() == '"') {
+        //         const literal = swidy.buildString(try reader.takeDelimiter('"'));
+        //         return swidy.buildPair(swidy.buildString("lit"), literal);
+        //     } else {
+        //         @panic("TODO");
+        //     }
+        // }
+
+        fn sexpr(swidy: *Swidy, reader: *std.Io.Reader) !Value {
             try whitespace(reader, false);
-            if (reader.peekByte() == '(') {
-                @panic("TODO");
-            } else if (reader.peekByte() == '"') {
-                const literal = swidy.buildString(try reader.takeDelimiter('"'));
-                return swidy.buildPair(swidy.buildString("lit"), literal);
+            if (try eat(reader, "(")) {
+                // TODO(correctness): remove artificial limit
+                var elements_buffer: [128]Value = undefined;
+
+                var elements: std.ArrayList(Value) = .initBuffer(&elements_buffer);
+                var sentinel: ?Value = null;
+
+                while (true) {
+                    try whitespace(reader, false);
+                    if (try eat(reader, ")")) {
+                        break;
+                    } else if (try eat(reader, ".")) {
+                        sentinel = try sexpr(swidy, reader);
+                        try whitespace(reader, false);
+                        try expect(reader, ")");
+                        break;
+                    } else {
+                        elements.appendBounded(try sexpr(swidy, reader)) catch OoM();
+                    }
+                }
+
+                return swidy.buildList(elements.items, sentinel);
+            } else if (try eat(reader, "\"")) {
+                return swidy.buildString(try reader.takeDelimiter('"') orelse return error.BadInput);
             } else {
-                @panic("TODO");
+                return error.BadInput;
             }
         }
     };
 
-    // fn parseSexpr(swidy: *Swidy, reader: *std.Io.Reader) !Index {
-    //     if (try reader.peekByte() == '(') {
-    //     } else {
-    //         reader.takeDelimiter(delimiter: u8)
-    //     }
-    // }
-
     fn OoM() noreturn {
         std.debug.panic("OoM", .{});
-    }
-
-    fn cast(value: usize) u32 {
-        return std.math.cast(u32, value) orelse OoM();
     }
 };
 
 // (ffi "add" (23.0f 12.0f))
-
-comptime {
-    std.testing.refAllDecls(Swidy);
-}
 
 pub fn main(init: std.process.Init) !void {
     // const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -165,12 +218,33 @@ pub fn main(init: std.process.Init) !void {
     try stdout_writer.flush();
 }
 
-// test "asdf" {
-//     const source: Reader = .fixed(
-//         \\ fn myFunc {
-//         \\     "a" -> "b";
-//         \\ }
-//         \\
-//         \\ main myFunc: "a";
-//     );
-// }
+test "sexpr parsing" {
+    var swidy: Swidy = .init(std.testing.allocator);
+    defer swidy.deinit();
+
+    const tests: []const @Tuple(&.{ []const u8, Swidy.Value }) = &.{
+        .{ "\"hi\"", swidy.buildString("hi") },
+        .{ "(\"hi\" . \"hey\")", swidy.buildPair(swidy.buildString("hi"), swidy.buildString("hey")) },
+        .{ "(\"hi\")", swidy.buildPair(swidy.buildString("hi"), swidy.buildString("nil")) },
+        .{ "(\"hi\" \"hey\")", swidy.buildPair(swidy.buildString("hi"), swidy.buildPair(swidy.buildString("hey"), swidy.buildString("nil"))) },
+        .{ "()", swidy.buildString("nil") },
+        .{ "( . \"nil\")", swidy.buildString("nil") },
+        .{ "(\"hi\" \"hey\" . \"bye\")", swidy.buildPair(swidy.buildString("hi"), swidy.buildPair(swidy.buildString("hey"), swidy.buildString("bye"))) },
+    };
+
+    for (tests) |test_case| {
+        var source: std.Io.Reader = .fixed(test_case[0]);
+        try swidy.expectEqual(
+            test_case[1],
+            try Swidy.Parser.sexpr(&swidy, &source),
+        );
+    }
+}
+
+// const source: std.io.Reader = .fixed(
+//     \\ fn myFunc {
+//     \\     "a" -> "b";
+//     \\ }
+//     \\
+//     \\ main myFunc: "a";
+// );
