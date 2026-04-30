@@ -433,6 +433,23 @@ pub const Swidy = struct {
             return swidy.buildList(elements.items, null);
         }
 
+        pub fn dyncall(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
+            const path = swidy.get(swidy.cr(value, &.{ .left, .left })).string;
+            const fnkname = swidy.get(swidy.cr(value, &.{ .left, .right })).string;
+            const argument = swidy.cr(value, &.{.right});
+
+            var dynlib = std.DynLib.open(path) catch panic("error while opening dynlib {s}", .{path});
+            defer dynlib.close();
+
+            const Signature = fn (swidy: *Swidy, value: Swidy.Value) Swidy.Value;
+            const fnk = dynlib.lookup(Signature, fnkname) orelse
+                panic("couldn't find fn {s} in dynlib {s}", .{ fnkname, path });
+
+            return fnk(swidy, argument);
+
+            // a -> @dyncall: ((stdlib . example) . foo)
+        }
+
         // pub fn add_u8_u8(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
         //     std.mem.readInt(comptime T: type, buffer: *const [?]u8, endian: Endian)
         //     switch (swidy.get(value)) {
