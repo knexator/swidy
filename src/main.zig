@@ -381,10 +381,10 @@ pub const Swidy = struct {
             return value;
         }
 
-        pub fn @"equals?"(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
+        pub fn @"eqAtoms?"(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
             const result = switch (swidy.get(value)) {
                 .string => false,
-                .pair => |pair| swidy.eql(pair.left, pair.right),
+                .pair => |pair| if (pair.left.tag == .string and pair.right.tag == .string) swidy.eql(pair.left, pair.right) else false,
             };
             return swidy.buildString(if (result) "true" else "false");
         }
@@ -483,8 +483,8 @@ test "builtins" {
         var source: std.Io.Reader = .fixed(
             \\ (("myFunc" . (
             \\      ((("lit" . "a") . ("lit" . "b")) . (("lit" . "@identity") . ()))
-            \\      ((("lit" . "b") . (("lit" . "b") . ("lit" . "b"))) . (("lit" . "@equals?") . ()))
-            \\      ((("lit" . "c") . (("lit" . "b") . ("lit" . "c"))) . (("lit" . "@equals?") . ()))
+            \\      ((("lit" . "b") . (("lit" . "b") . ("lit" . "b"))) . (("lit" . "@eqAtoms?") . ()))
+            \\      ((("lit" . "c") . (("lit" . "b") . ("lit" . "c"))) . (("lit" . "@eqAtoms?") . ()))
             \\ )))
         );
         break :blk try Swidy.Parser.sexpr(&swidy, &source);
