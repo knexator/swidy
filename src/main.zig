@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const assert = std.debug.assert;
+const panic = std.debug.panic;
 
 // builtin: identity (maybe), eqAtoms?, split, concat, addu32u32 (etc)
 
@@ -40,6 +41,31 @@ pub const Swidy = struct {
 
     pub fn expectEqual(swidy: *const Swidy, expected: Value, actual: Value) !void {
         try std.testing.expect(swidy.eql(expected, actual));
+    }
+
+    pub fn expectEqualAsStrings(swidy: *const Swidy, expected: Value, actual: Value, scratch: std.mem.Allocator) !void {
+        const expected_str = try std.fmt.allocPrint(scratch, "{f}", .{swidy.fmt(expected)});
+        defer scratch.free(expected_str);
+        const actual_str = try std.fmt.allocPrint(scratch, "{f}", .{swidy.fmt(actual)});
+        defer scratch.free(actual_str);
+        try std.testing.expectEqualStrings(expected_str, actual_str);
+    }
+
+    // "{f}", .{swidy.fmt(value)}.
+    pub fn fmt(swidy: *const Swidy, value: Value) struct {
+        swidy: *const Swidy,
+        value: Value,
+        pub fn format(ctx: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            switch (ctx.swidy.get(ctx.value)) {
+                .string => |str| try writer.writeAll(str),
+                .pair => |pair| try writer.print("({f} . {f})", .{
+                    ctx.swidy.fmt(pair.left),
+                    ctx.swidy.fmt(pair.right),
+                }),
+            }
+        }
+    } {
+        return .{ .swidy = swidy, .value = value };
     }
 
     pub const Tag = enum(u1) { pair, string };
@@ -119,11 +145,13 @@ pub const Swidy = struct {
     fn cr(swidy: *const Swidy, value: Value, address: []const enum { left, right }) Value {
         var result = value;
         for (address) |dir| {
-            const pair = swidy.get(result).pair;
-            result = switch (dir) {
-                .left => pair.left,
-                .right => pair.right,
-            };
+            switch (swidy.get(result)) {
+                .string => panic("bad address {any} for value {f}", .{ address, swidy.fmt(value) }),
+                .pair => |pair| result = switch (dir) {
+                    .left => pair.left,
+                    .right => pair.right,
+                },
+            }
         }
         return result;
     }
@@ -136,7 +164,7 @@ pub const Swidy = struct {
                     const builtin = @field(BuiltinFnks, decl.name);
                     return builtin(swidy, input);
                 }
-            } else unreachable;
+            } else panic("unknown builtin: @{s}", .{builtin_name});
         } else {
             const fnkbody = swidy.lookup(fnkname, known_fnks) orelse swidy.buildString("nil");
             return swidy.eval_inner(fnkbody, input, swidy.buildString("nil"), known_fnks);
@@ -148,11 +176,12 @@ pub const Swidy = struct {
         while (it.next()) |case| {
             const pattern = swidy.cr(case, &.{ .left, .left });
             const template = swidy.cr(case, &.{ .left, .right });
-            const fnkname = swidy.cr(case, &.{ .right, .left });
+            const fnkname_template = swidy.cr(case, &.{ .right, .left });
             const next = swidy.cr(case, &.{ .right, .right });
 
             if (swidy.generateBindings(pattern, input)) |bindings| {
                 const all_bindings = swidy.concat(&.{ bindings, parent_bindings });
+                const fnkname = swidy.fillBindings(fnkname_template, all_bindings);
                 const new_input_v1 = swidy.fillBindings(template, all_bindings);
                 const new_input_v2 = swidy.eval(fnkname, new_input_v1, known_fnks);
                 return swidy.eval_inner(next, new_input_v2, all_bindings, known_fnks);
@@ -163,15 +192,15 @@ pub const Swidy = struct {
 
     fn generateBindings(swidy: *Swidy, pattern: Value, value: Value) ?Value {
         switch (swidy.get(pattern)) {
-            .string => unreachable,
+            .string => panic("bad pattern: {f}", .{swidy.fmt(pattern)}),
             .pair => |pattern_pair| {
                 if (pattern_pair.left.tag == .string) {
                     if (swidy.isLit(pattern_pair.left, "lit")) {
                         return if (swidy.eql(pattern_pair.right, value)) swidy.buildString("nil") else null;
                     } else if (swidy.isLit(pattern_pair.left, "var")) {
-                        assert(pattern_pair.right.tag == .string);
+                        if (pattern_pair.right.tag != .string) panic("bad pattern: {f}", .{swidy.fmt(pattern)});
                         return swidy.buildList(&.{swidy.buildPair(pattern_pair.right, value)}, null);
-                    } else unreachable;
+                    } else panic("bad pattern: {f}", .{swidy.fmt(pattern)});
                 } else {
                     if (value.tag == .string) return null;
                     if (swidy.generateBindings(pattern_pair.left, swidy.get(value).pair.left)) |left_bindings| {
@@ -186,15 +215,15 @@ pub const Swidy = struct {
 
     fn fillBindings(swidy: *Swidy, template: Value, bindings: Value) Value {
         switch (swidy.get(template)) {
-            .string => unreachable,
+            .string => panic("bad template: {f}", .{swidy.fmt(template)}),
             .pair => |template_pair| {
                 if (template_pair.left.tag == .string) {
                     if (swidy.isLit(template_pair.left, "lit")) {
                         return template_pair.right;
                     } else if (swidy.isLit(template_pair.left, "var")) {
-                        assert(template_pair.right.tag == .string);
-                        return swidy.lookup(template_pair.right, bindings) orelse unreachable;
-                    } else unreachable;
+                        if (template_pair.right.tag != .string) panic("bad template: {f}", .{swidy.fmt(template)});
+                        return swidy.lookup(template_pair.right, bindings) orelse panic("unbound var: {f}", .{swidy.fmt(template_pair.right)});
+                    } else panic("bad template: {f}", .{swidy.fmt(template)});
                 } else return swidy.buildPair(
                     swidy.fillBindings(template_pair.left, bindings),
                     swidy.fillBindings(template_pair.right, bindings),
@@ -256,7 +285,7 @@ pub const Swidy = struct {
 
         pub fn next(it: *ListIterator) ?Value {
             if (it.cur.tag == .string) {
-                assert(it.swidy.isNil(it.cur));
+                if (!it.swidy.isNil(it.cur)) panic("unexpected non-nil sentinel: {s}", .{it.swidy.get(it.cur).string});
                 return null;
             } else {
                 const result = it.swidy.cr(it.cur, &.{.left});
@@ -345,25 +374,22 @@ pub const Swidy = struct {
         std.debug.panic("OoM", .{});
     }
 
+    // all fnks must be pub, to be visible in reflection
     const BuiltinFnks = struct {
-        fn identity(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
+        pub fn identity(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
             _ = swidy;
             return value;
         }
 
-        fn @"equals?"(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
-            return switch (swidy.get(value)) {
+        pub fn @"equals?"(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
+            const result = switch (swidy.get(value)) {
                 .string => false,
-                .pair => |pair| swidy.buildString(
-                    if (swidy.eql(pair.left, pair.right))
-                        "true"
-                    else
-                        "false",
-                ),
+                .pair => |pair| swidy.eql(pair.left, pair.right),
             };
+            return swidy.buildString(if (result) "true" else "false");
         }
 
-        // fn add_u8_u8(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
+        // pub fn add_u8_u8(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
         //     std.mem.readInt(comptime T: type, buffer: *const [?]u8, endian: Endian)
         //     switch (swidy.get(value)) {
         //         .bytes => return 1,
@@ -471,17 +497,16 @@ test "builtins" {
         try swidy.expectEqual(swidy.buildString("b"), result);
     }
 
-    // TODO(now): investigate
     if (true) {
         const input_value = swidy.buildString("b");
         const result = swidy.eval(fnkname, input_value, known_fnks);
-        try swidy.expectEqual(swidy.buildString("true"), result);
+        try swidy.expectEqualAsStrings(swidy.buildString("true"), result, std.testing.allocator);
     }
 
     if (true) {
         const input_value = swidy.buildString("c");
         const result = swidy.eval(fnkname, input_value, known_fnks);
-        try swidy.expectEqual(swidy.buildString("false"), result);
+        try swidy.expectEqualAsStrings(swidy.buildString("false"), result, std.testing.allocator);
     }
 }
 
