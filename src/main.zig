@@ -133,6 +133,23 @@ pub const Swidy = struct {
         return result;
     }
 
+    pub fn buildStringByParts(swidy: *Swidy) StringBuilder {
+        return .{ .result = swidy.buildString(""), .swidy = swidy };
+    }
+
+    const StringBuilder = struct {
+        result: Value,
+        swidy: *Swidy,
+
+        pub fn add(builder: *StringBuilder, part: []const u8) void {
+            assert(builder.result.tag == .string);
+            const string = &builder.swidy.slots_strings.items[builder.result.index];
+            assert(string.start + string.len == builder.swidy.strings.items.len);
+            builder.swidy.strings.appendSlice(builder.swidy.gpa, part) catch OoM();
+            string.len = std.math.cast(u32, @as(usize, string.len) + part.len) orelse OoM();
+        }
+    };
+
     fn buildList(swidy: *Swidy, elements: []const Value, sentinel: ?Value) Value {
         var result = sentinel orelse swidy.buildString("nil");
         var it = std.mem.reverseIterator(elements);
@@ -389,6 +406,33 @@ pub const Swidy = struct {
             return swidy.buildString(if (result) "true" else "false");
         }
 
+        pub fn join(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
+            var builder = swidy.buildStringByParts();
+            var it = swidy.listIterator(value);
+            while (it.next()) |element| {
+                if (element.tag != .string) panic("unexpected non-string element: {f}", .{swidy.fmt(element)});
+                builder.add(swidy.get(element).string);
+            }
+            return builder.result;
+        }
+
+        pub fn split(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
+            if (value.tag != .string) panic("unexpected non-string argument: {f}", .{swidy.fmt(value)});
+            const string: Value.String = swidy.slots_strings.items[value.index];
+
+            // TODO(correctness): remove artificial limit
+            var elements_buffer: [128]Value = undefined;
+
+            var elements: std.ArrayList(Value) = .initBuffer(&elements_buffer);
+            for (0..string.len) |k| {
+                const cur = swidy.createCell(.string);
+                swidy.slots_strings.items[cur.index] = .{ .start = @intCast(string.start + k), .len = 1 };
+                elements.appendBounded(cur) catch OoM();
+            }
+
+            return swidy.buildList(elements.items, null);
+        }
+
         // pub fn add_u8_u8(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
         //     std.mem.readInt(comptime T: type, buffer: *const [?]u8, endian: Endian)
         //     switch (swidy.get(value)) {
@@ -485,6 +529,8 @@ test "builtins" {
             \\      ((("lit" . "a") . ("lit" . "b")) . (("lit" . "@identity") . ()))
             \\      ((("lit" . "b") . (("lit" . "b") . ("lit" . "b"))) . (("lit" . "@eqAtoms?") . ()))
             \\      ((("lit" . "c") . (("lit" . "b") . ("lit" . "c"))) . (("lit" . "@eqAtoms?") . ()))
+            \\      ((("lit" . "d") . (("lit" . "a") . (("lit" . "b") . ("lit" . "nil")))) . (("lit" . "@join") . ()))
+            \\      ((("lit" . "e") . ("lit" . "ab")) . (("lit" . "@split") . ()))
             \\ )))
         );
         break :blk try Swidy.Parser.sexpr(&swidy, &source);
@@ -507,6 +553,18 @@ test "builtins" {
         const input_value = swidy.buildString("c");
         const result = swidy.eval(fnkname, input_value, known_fnks);
         try swidy.expectEqualAsStrings(swidy.buildString("false"), result, std.testing.allocator);
+    }
+
+    if (true) {
+        const input_value = swidy.buildString("d");
+        const result = swidy.eval(fnkname, input_value, known_fnks);
+        try swidy.expectEqualAsStrings(swidy.buildString("ab"), result, std.testing.allocator);
+    }
+
+    if (true) {
+        const input_value = swidy.buildString("e");
+        const result = swidy.eval(fnkname, input_value, known_fnks);
+        try swidy.expectEqualAsStrings(swidy.buildList(&.{ swidy.buildString("a"), swidy.buildString("b") }, null), result, std.testing.allocator);
     }
 }
 
