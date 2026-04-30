@@ -446,17 +446,40 @@ pub const Swidy = struct {
 
 // (ffi "add" (23.0f 12.0f))
 
-pub fn main(init: std.process.Init) !void {
-    // const args = try init.minimal.args.toSlice(init.arena.allocator());
-
+pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
+
+    const args = (try init.minimal.args.toSlice(init.arena.allocator()))[1..];
+    if (args.len != 1) {
+        std.log.err("expected exactly 1 arg", .{});
+        return 1;
+    }
+    const filename = args[0];
+
+    var swidy: Swidy = .init(init.gpa);
+    defer swidy.deinit();
+
+    const cwd: std.Io.Dir = .cwd();
+    const file = try cwd.openFile(io, filename, .{ .resolve_beneath = true, .allow_directory = false });
+    var file_buffer: [1024]u8 = undefined;
+    var file_reader = file.reader(io, &file_buffer);
+
+    const main_expr = try Swidy.Parser.sexpr(&swidy, &file_reader.interface);
+    const result = swidy.eval(
+        swidy.cr(main_expr, &.{ .left, .left }),
+        swidy.cr(main_expr, &.{ .left, .right }),
+        swidy.cr(main_expr, &.{.right}),
+    );
+
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout_writer = &stdout_file_writer.interface;
 
-    try stdout_writer.print("swidy\n", .{});
+    try stdout_writer.print("{f}\n", .{swidy.fmt(result)});
 
     try stdout_writer.flush();
+
+    return 0;
 }
 
 test "sexpr parsing" {
@@ -492,8 +515,8 @@ test "fnk" {
     const known_fnks: Swidy.Value = blk: {
         var source: std.Io.Reader = .fixed(
             \\ (("myFunc" . (
-            \\      ((("lit" . "a") . ("lit" . "b")) . (("lit" . "identity") . ()))
-            \\      ((("var" . "x") . (("var" . "x") . ("var" . "x"))) . (("lit" . "identity") . ()))
+            \\      ((("lit" . "a") . ("lit" . "b")) . (("lit" . "@identity") . ()))
+            \\      ((("var" . "x") . (("var" . "x") . ("var" . "x"))) . (("lit" . "@identity") . ()))
             \\ )))
         );
         break :blk try Swidy.Parser.sexpr(&swidy, &source);

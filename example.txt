@@ -1,0 +1,10 @@
+(
+    ("myFunc"  . "b")
+    .
+    (
+        ("myFunc" . (
+            ((("lit" . "a") . ("lit" . "b")) . (("lit" . "@identity") . ()))
+            ((("var" . "x") . (("var" . "x") . ("var" . "x"))) . (("lit" . "@identity") . ()))
+        ))
+    )
+)
