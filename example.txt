@@ -4,6 +4,7 @@
     (
         ("myFunc" . (
             ((("lit" . "a") . ("lit" . "b")) . (("lit" . "@identity") . ()))
+            ((("lit" . "b") . ("lit" . (("./zig-out/lib/libstdlib.so" . "example") . "c"))) . (("lit" . "@dyncall") . ()))
             ((("var" . "x") . (("var" . "x") . ("var" . "x"))) . (("lit" . "@identity") . ()))
         ))
     )

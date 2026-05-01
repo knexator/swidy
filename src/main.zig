@@ -434,20 +434,22 @@ pub const Swidy = struct {
         }
 
         pub fn dyncall(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
+            // a -> @dyncall: ((stdlib . example) . foo)
             const path = swidy.get(swidy.cr(value, &.{ .left, .left })).string;
-            const fnkname = swidy.get(swidy.cr(value, &.{ .left, .right })).string;
+            const fnkname = std.mem.concatWithSentinel(swidy.gpa, u8, &.{
+                swidy.get(swidy.cr(value, &.{ .left, .right })).string,
+            }, 0) catch OoM();
+            defer swidy.gpa.free(fnkname);
             const argument = swidy.cr(value, &.{.right});
 
             var dynlib = std.DynLib.open(path) catch panic("error while opening dynlib {s}", .{path});
             defer dynlib.close();
 
-            const Signature = fn (swidy: *Swidy, value: Swidy.Value) Swidy.Value;
-            const fnk = dynlib.lookup(Signature, fnkname) orelse
+            const Signature = fn (swidy: *Swidy, value: Swidy.Value) callconv(.c) Swidy.Value;
+            const fnk = dynlib.lookup(*const Signature, fnkname) orelse
                 panic("couldn't find fn {s} in dynlib {s}", .{ fnkname, path });
 
             return fnk(swidy, argument);
-
-            // a -> @dyncall: ((stdlib . example) . foo)
         }
 
         // pub fn add_u8_u8(swidy: *Swidy, value: Swidy.Value) Swidy.Value {
