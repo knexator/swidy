@@ -1,10 +1,11 @@
 (
-    ("myFunc"  . "b")
+    ("myFunc"  . "c")
     .
     (
         ("myFunc" . (
             ((("lit" . "a") . ("lit" . "b")) . (("lit" . "@identity") . ()))
             ((("lit" . "b") . ("lit" . (("./zig-out/lib/libstdlib.so" . "example") . "c"))) . (("lit" . "@dyncall") . ()))
+            ((("lit" . "c") . ("lit" . (("./zig-out/lib/libstdlib.so" . "add_u32_u32") . ("1234" . "0000")))) . (("lit" . "@dyncall") . ()))
             ((("var" . "x") . (("var" . "x") . ("var" . "x"))) . (("lit" . "@identity") . ()))
         ))
     )
