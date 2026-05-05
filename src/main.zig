@@ -57,7 +57,8 @@ pub const Swidy = struct {
         value: Value,
         pub fn format(ctx: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
             switch (ctx.swidy.get(ctx.value)) {
-                .string => |str| try writer.writeAll(str),
+                // TODO: improve to ensure round-trip of values even for edge cases
+                .string => |str| try writer.print("\"{f}\"", .{std.ascii.hexEscape(str, .lower)}),
                 .pair => |pair| try writer.print("({f} . {f})", .{
                     ctx.swidy.fmt(pair.left),
                     ctx.swidy.fmt(pair.right),
@@ -351,6 +352,17 @@ pub const Swidy = struct {
         // }
 
         fn sexpr(swidy: *Swidy, reader: *std.Io.Reader) !Value {
+            const readHexDigit = struct {
+                fn anon(c: u8) ?u8 {
+                    return switch (c) {
+                        '0'...'9' => c - '0',
+                        'a'...'f' => c - 'a' + 10,
+                        'A'...'F' => c - 'A' + 10,
+                        else => null,
+                    };
+                }
+            }.anon;
+
             try whitespace(reader, false);
             if (try eat(reader, "(")) {
                 // TODO(correctness): remove artificial limit
@@ -375,7 +387,32 @@ pub const Swidy = struct {
 
                 return swidy.buildList(elements.items, sentinel);
             } else if (try eat(reader, "\"")) {
-                return swidy.buildString(try reader.takeDelimiter('"') orelse return error.BadInput);
+                var builder = swidy.buildStringByParts();
+                while (true) {
+                    const b = try reader.takeByte();
+
+                    switch (b) {
+                        '\n' => return error.BadInput,
+                        '"' => return builder.result,
+                        '\\' => switch (try reader.takeByte()) {
+                            // TODO?
+                            // 'n',
+                            // 'r',
+                            // '\\',
+                            // 't',
+                            // '\'',
+                            // '"' => builder.add(&.{"\""}),
+                            'x' => {
+                                const hi = readHexDigit(try reader.takeByte()) orelse return error.BadInput;
+                                const lo = readHexDigit(try reader.takeByte()) orelse return error.BadInput;
+                                builder.add(&.{hi * 16 + lo});
+                            },
+                            else => return error.BadInput,
+                        },
+                        else => builder.add(&.{b}),
+                    }
+                }
+                // return swidy.buildString(try reader.takeDelimiter('"') orelse return error.BadInput);
             } else {
                 // // TODO(correctness): remove artificial limit
                 // var string_buffer: [512]u8 = undefined;
