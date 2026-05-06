@@ -57,8 +57,24 @@ pub const Swidy = struct {
         value: Value,
         pub fn format(ctx: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
             switch (ctx.swidy.get(ctx.value)) {
-                // TODO: improve to ensure round-trip of values even for edge cases
-                .string => |str| try writer.print("\"{f}\"", .{std.ascii.hexEscape(str, .lower)}),
+                .string => |str| {
+                    const charset = "0123456789ABCDEF";
+                    var buf: [4]u8 = undefined;
+                    buf[0] = '\\';
+                    buf[1] = 'x';
+
+                    try writer.writeByte('\"');
+                    for (str) |c| {
+                        if (std.ascii.isAlphanumeric(c)) {
+                            try writer.writeByte(c);
+                        } else {
+                            buf[2] = charset[c >> 4];
+                            buf[3] = charset[c & 15];
+                            try writer.writeAll(&buf);
+                        }
+                    }
+                    try writer.writeByte('\"');
+                },
                 .pair => |pair| try writer.print("({f} . {f})", .{
                     ctx.swidy.fmt(pair.left),
                     ctx.swidy.fmt(pair.right),
