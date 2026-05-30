@@ -344,7 +344,13 @@ pub const Swidy = struct {
 
         fn whitespace(reader: *std.Io.Reader, mandatory: bool) !void {
             var seen_any: bool = false;
-            while (std.ascii.isWhitespace(try reader.peekByte())) {
+            while (blk: {
+                const b = reader.peekByte() catch |err| switch (err) {
+                    error.EndOfStream => break :blk false,
+                    inline else => |x| return x,
+                };
+                break :blk std.ascii.isWhitespace(b);
+            }) {
                 reader.toss(1);
                 seen_any = true;
             }
