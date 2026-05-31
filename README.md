@@ -14,8 +14,7 @@ The only instruction has four parameters: a pattern, a template, the name of a f
 }
 ```
 
-There are only 5 builtin functions:
-- `@identity`: return the input value.
+There are only 4 builtin functions:
 - `@eqAtoms?`: returns `"true"` if the input is a pair of two identical byte slices, `"false"` otherwise.
 - `@join`: takes as input a list of byte slices; returns a single byte slice with their concatenation.
 - `@split`: the opposite of `@join`
@@ -23,4 +22,9 @@ There are only 5 builtin functions:
 
 External functions are inspired by Lua, and must take a pointer to a `Swidy` instance, and a single `u32` index to a S-expression, returning another `u32` index for the result.
 
-The `swidy` executable reads the given file as an S-expression, interpreting it as `( ( function_name . input ) . list_of_known_functions )` and evaluating it, printing the result.
+The `swidy` executable is a debugger; TODO: instructions
+
+There are 3 versions of the language, the three practical ways of defining recursive functions:
+- dynamically scoped variables
+- mutable environments
+- global environment only for functions
