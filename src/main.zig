@@ -131,10 +131,25 @@ pub const Swidy = struct {
     // TODO(perf): free and reuse cells
     // fn destroyCell
 
+    fn buildSexpr(swidy: *Swidy, str: []const u8) !Value {
+        errdefer std.log.err("failed to build sexpr for input {s}", .{str});
+        var reader: std.Io.Reader = .fixed(str);
+        const result = try Parser.sexpr(swidy, &reader);
+        try Parser.whitespace(&reader, false);
+        if (reader.bufferedLen() > 0) return error.MoreThanOneSexpr;
+        return result;
+    }
+
     pub fn buildPair(swidy: *Swidy, left: Value, right: Value) Value {
         const result = swidy.createCell(.pair);
         swidy.slots_pairs.items[result.index] = .{ .left = left, .right = right };
         return result;
+    }
+
+    fn splitPair(swidy: *Swidy, value: Value) [2]Value {
+        assert(value.tag == .pair);
+        const pair = swidy.get(value).pair;
+        return .{ pair.left, pair.right };
     }
 
     pub fn buildString(swidy: *Swidy, bytes: []const u8) Value {
@@ -177,9 +192,14 @@ pub const Swidy = struct {
     }
 
     fn cr(swidy: *const Swidy, value: Value, address: []const enum { left, right }) Value {
+        //     return swidy.crSafe(value, address) orelse panic("bad address {any} for value {f}", .{ address, swidy.fmt(value) });
+        // }
+
+        // fn crSafe(swidy: *const Swidy, value: Value, address: []const enum { left, right }) ?Value {
         var result = value;
         for (address) |dir| {
             switch (swidy.get(result)) {
+                // .string => return null,
                 .string => panic("bad address {any} for value {f}", .{ address, swidy.fmt(value) }),
                 .pair => |pair| result = switch (dir) {
                     .left => pair.left,
@@ -224,6 +244,35 @@ pub const Swidy = struct {
         return input;
     }
 
+    fn generateBindingsIntoEnv(swidy: *Swidy, pattern: Value, value: Value, env: Value) ?Value {
+        switch (swidy.get(pattern)) {
+            .string => panic("bad pattern: {f}", .{swidy.fmt(pattern)}),
+            .pair => |pattern_pair| {
+                if (pattern_pair.left.tag == .string) {
+                    if (swidy.isLit(pattern_pair.left, "lit")) {
+                        return if (swidy.eql(pattern_pair.right, value)) env else null;
+                    } else if (swidy.isLit(pattern_pair.left, "var")) {
+                        if (pattern_pair.right.tag != .string) panic("bad pattern: {f}", .{swidy.fmt(pattern)});
+                        return swidy.envSet(pattern_pair.right, value, env);
+                    } else panic("bad pattern: {f}", .{swidy.fmt(pattern)});
+                } else {
+                    if (value.tag == .string) return null;
+                    const env_1 = swidy.generateBindingsIntoEnv(
+                        pattern_pair.left,
+                        swidy.get(value).pair.left,
+                        env,
+                    ) orelse return null;
+                    const env_2 = swidy.generateBindingsIntoEnv(
+                        pattern_pair.right,
+                        swidy.get(value).pair.right,
+                        env_1,
+                    ) orelse return null;
+                    return env_2;
+                }
+            },
+        }
+    }
+
     fn generateBindings(swidy: *Swidy, pattern: Value, value: Value) ?Value {
         switch (swidy.get(pattern)) {
             .string => panic("bad pattern: {f}", .{swidy.fmt(pattern)}),
@@ -243,6 +292,25 @@ pub const Swidy = struct {
                         } else return null;
                     } else return null;
                 }
+            },
+        }
+    }
+
+    fn fillFromEnv(swidy: *Swidy, template: Value, env: Value) !Value {
+        switch (swidy.get(template)) {
+            .string => return error.BadTemplate,
+            .pair => |template_pair| {
+                if (template_pair.left.tag == .string) {
+                    if (swidy.isLit(template_pair.left, "lit")) {
+                        return template_pair.right;
+                    } else if (swidy.isLit(template_pair.left, "var")) {
+                        if (template_pair.right.tag != .string) return error.BadTemplate;
+                        return swidy.envGet(template_pair.right, env) orelse error.UnboundVar;
+                    } else return error.BadTemplate;
+                } else return swidy.buildPair(
+                    try swidy.fillFromEnv(template_pair.left, env),
+                    try swidy.fillFromEnv(template_pair.right, env),
+                );
             },
         }
     }
@@ -288,6 +356,36 @@ pub const Swidy = struct {
         return result;
     }
 
+    fn envGet(swidy: *const Swidy, key: Value, env: Value) ?Value {
+        const dict, const parent_envs = .{
+            swidy.cr(env, &.{.left}),
+            swidy.cr(env, &.{.right}),
+        };
+
+        if (swidy.lookup(key, dict)) |r| return r;
+
+        var it = swidy.listIterator(parent_envs);
+        while (it.next()) |parent_env| {
+            if (swidy.envGet(key, parent_env)) |r| return r;
+        }
+
+        return null;
+    }
+
+    fn envSet(swidy: *Swidy, key: Value, value: Value, old_env: Value) Value {
+        const old_dict, const parent_envs = .{
+            swidy.cr(old_env, &.{.left}),
+            swidy.cr(old_env, &.{.right}),
+        };
+
+        const new_dict = swidy.buildPair(
+            swidy.buildPair(key, value),
+            old_dict,
+        );
+
+        return swidy.buildPair(new_dict, parent_envs);
+    }
+
     fn lookup(swidy: *const Swidy, key: Value, dict: Value) ?Value {
         var it = swidy.listIterator(dict);
         while (it.next()) |pair| {
@@ -307,6 +405,15 @@ pub const Swidy = struct {
 
     fn isNil(swidy: *const Swidy, value: Value) bool {
         return swidy.isLit(value, "nil");
+    }
+
+    fn isList(swidy: *const Swidy, value: Value) bool {
+        var cur = value;
+        while (cur.tag == .pair) {
+            cur = swidy.get(cur).pair.right;
+        }
+        assert(cur.tag == .string);
+        return swidy.isLit(cur, "nil");
     }
 
     fn listIterator(swidy: *const Swidy, list: Value) ListIterator {
@@ -524,7 +631,7 @@ pub const Swidy = struct {
 
 // (ffi "add" (23.0f 12.0f))
 
-pub fn main(init: std.process.Init) !u8 {
+pub fn main2(init: std.process.Init) !u8 {
     const io = init.io;
 
     const args = (try init.minimal.args.toSlice(init.arena.allocator()))[1..];
@@ -555,6 +662,34 @@ pub fn main(init: std.process.Init) !u8 {
 
     try stdout_writer.print("{f}\n", .{swidy.fmt(result)});
 
+    try stdout_writer.flush();
+
+    return 0;
+}
+
+pub fn main(init: std.process.Init) !u8 {
+    const io = init.io;
+
+    var swidy: Swidy = .init(init.gpa);
+    defer swidy.deinit();
+
+    var debugger: Debugger = .init(&swidy);
+
+    var stdin_buffer: [1024]u8 = undefined;
+    var stdin_file_reader: Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
+    const stdin_reader = &stdin_file_reader.interface;
+
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+    const stdout_writer = &stdout_file_writer.interface;
+
+    while (true) {
+        try stdout_writer.print("> ", .{});
+        try stdout_writer.flush();
+        const in = try Swidy.Parser.sexpr(&swidy, stdin_reader);
+        const out = debugger.do(in);
+        try stdout_writer.print("{f}\n", .{swidy.fmt(out)});
+    }
     try stdout_writer.flush();
 
     return 0;
@@ -668,6 +803,434 @@ test "builtins" {
         try swidy.expectEqualAsStrings(swidy.buildList(&.{ swidy.buildString("a"), swidy.buildString("b") }, null), result, std.testing.allocator);
     }
 }
+
+pub const Debugger = struct {
+    swidy: *Swidy,
+    active_value: Swidy.Value,
+    /// list of pairs of (next_cases, env); always has at least one element (the debugger state)
+    stack: Swidy.Value,
+
+    pub fn init(swidy: *Swidy) Debugger {
+        return .{
+            .swidy = swidy,
+            .active_value = swidy.buildString("nil"),
+            .stack = swidy.buildSexpr("((() . (() . ())))") catch unreachable,
+        };
+    }
+
+    fn testHelper(debugger: *Debugger, in: []const u8, expected_out: []const u8) !void {
+        const in_value = try debugger.swidy.buildSexpr(in);
+        const expected_out_value = try debugger.swidy.buildSexpr(expected_out);
+        const out = debugger.do(in_value);
+        try debugger.swidy.expectEqual(expected_out_value, out);
+    }
+
+    pub fn doOld(debugger: *Debugger, in: Swidy.Value) !Swidy.Value {
+        const swidy = debugger.swidy;
+        if (in.tag != .pair) return swidy.buildString("#error");
+        var it = swidy.listIterator(in);
+        const command = it.next() orelse return swidy.buildString("#error");
+        if (false) { // hardcoded check for all commands
+        } else if (swidy.isLit(command, "set")) {
+            const key = it.next() orelse return swidy.buildString("#error");
+            const value = it.next() orelse return swidy.buildString("#error");
+            if (it.next() != null) return swidy.buildString("#error");
+
+            debugger.addVar(key, value);
+
+            return swidy.buildString("#inert");
+        } else if (swidy.isLit(command, "lookup")) {
+            const key = it.next() orelse return swidy.buildString("#error");
+            if (it.next() != null) return swidy.buildString("#error");
+
+            const value = swidy.envGet(key, debugger.activeEnv()) orelse return swidy.buildString("#undefined");
+
+            return swidy.buildPair(swidy.buildString("#found"), value);
+        } else if (swidy.isLit(command, "fill")) {
+            const template = it.next() orelse return swidy.buildString("#error");
+            if (it.next() != null) return swidy.buildString("#error");
+
+            const value = swidy.fillFromEnv(template, debugger.activeEnv()) catch return swidy.buildString("#error");
+
+            return value;
+        } else if (swidy.isLit(command, "debug")) {
+            const fnkname = it.next() orelse return swidy.buildString("#error");
+            const value = it.next() orelse return swidy.buildString("#error");
+            if (it.next() != null) return swidy.buildString("#error");
+
+            debugger.active_value = value;
+            debugger.callFnk(fnkname);
+
+            return swidy.buildString("#inert");
+            // } else if (swidy.isLit(command, "step")) {
+            //     if (it.next() != null) return swidy.buildString("#error");
+            //     if (!swidy.isNil(debugger.next_cases)) {
+            //         const active_case = swidy.cr(debugger.next_cases, &.{.left});
+            //         debugger.next_cases = swidy.cr(debugger.next_cases, &.{.right});
+
+            //         const pattern = swidy.cr(active_case, &.{ .left, .left });
+            //         const template = swidy.cr(active_case, &.{ .left, .right });
+            //         const fnkname_template = swidy.cr(active_case, &.{ .right, .left });
+            //         const next = swidy.cr(active_case, &.{ .right, .right });
+
+            //         if (swidy.generateBindingsIntoEnv(pattern, debugger.active_value, debugger.env)) |new_env| {
+            //             debugger.env = new_env;
+            //             debugger.active_value = swidy.fillFromEnv(template, debugger.env) catch return swidy.buildString("#error");
+            //             debugger.stack =
+            //         }
+            //     }
+        } else return swidy.buildString("#error");
+    }
+
+    pub fn do(debugger: *Debugger, in: Swidy.Value) Swidy.Value {
+        const swidy = debugger.swidy;
+        if (in.tag != .pair) return swidy.buildString("#error");
+        var it = swidy.listIterator(in);
+        const command = it.next() orelse return swidy.buildString("#error");
+        if (false) { // hardcoded check for all commands
+        } else if (swidy.isLit(command, "setActive")) {
+            const value = it.next() orelse return swidy.buildString("#error");
+            if (it.next() != null) return swidy.buildString("#error");
+
+            debugger.active_value = value;
+
+            return swidy.buildString("#inert");
+        } else if (swidy.isLit(command, "getActive")) {
+            if (it.next() != null) return swidy.buildString("#error");
+
+            const value = debugger.active_value;
+
+            return value;
+        } else if (swidy.isLit(command, "prependCase")) {
+            const case = it.next() orelse return swidy.buildString("#error");
+            if (it.next() != null) return swidy.buildString("#error");
+
+            debugger.prependCase(case);
+
+            return swidy.buildString("#inert");
+        } else if (swidy.isLit(command, "runAll")) {
+            if (it.next() != null) return swidy.buildString("#error");
+
+            // TODO(now)
+            for (0..100) |_| {
+                debugger.step() catch return swidy.buildString("#error");
+            }
+
+            return swidy.buildString("#inert");
+        } else if (swidy.isLit(command, "step")) {
+            if (it.next() != null) return swidy.buildString("#error");
+
+            debugger.step() catch return swidy.buildString("#error");
+
+            return swidy.buildString("#inert");
+        } else return swidy.buildString("#error");
+    }
+
+    fn addVar(debugger: *Debugger, key: Swidy.Value, value: Swidy.Value) void {
+        const swidy = debugger.swidy;
+
+        const active_stack, const rest_stack = swidy.splitPair(debugger.stack);
+        const active_cases, const active_env = swidy.splitPair(active_stack);
+
+        const new_active_env = swidy.envSet(key, value, active_env);
+        const new_active_stack = swidy.buildPair(active_cases, new_active_env);
+        debugger.stack = swidy.buildPair(new_active_stack, rest_stack);
+    }
+
+    fn activeEnv(debugger: *Debugger) Swidy.Value {
+        const swidy = debugger.swidy;
+
+        const active_stack, const rest_stack = swidy.splitPair(debugger.stack);
+        const active_cases, const active_env = swidy.splitPair(active_stack);
+        _ = rest_stack;
+        _ = active_cases;
+
+        return active_env;
+    }
+
+    fn prependCase(debugger: *Debugger, case: Swidy.Value) void {
+        const swidy = debugger.swidy;
+
+        const active_stack, const rest_stack = swidy.splitPair(debugger.stack);
+        const active_cases, const active_env = swidy.splitPair(active_stack);
+
+        const new_active_cases = swidy.buildPair(case, active_cases);
+        const new_active_stack = swidy.buildPair(new_active_cases, active_env);
+        debugger.stack = swidy.buildPair(new_active_stack, rest_stack);
+    }
+
+    fn step(debugger: *Debugger) !void {
+        const swidy = debugger.swidy;
+
+        const active_stack, const rest_stack = swidy.splitPair(debugger.stack);
+        const active_cases, const active_env = swidy.splitPair(active_stack);
+
+        if (!swidy.isNil(active_cases)) {
+            const active_case, const rest_cases = swidy.splitPair(active_cases);
+
+            const pattern = swidy.cr(active_case, &.{ .left, .left });
+            const template = swidy.cr(active_case, &.{ .left, .right });
+            const fnkname_template = swidy.cr(active_case, &.{ .right, .left });
+            const next = swidy.cr(active_case, &.{ .right, .right });
+
+            if (swidy.generateBindingsIntoEnv(pattern, debugger.active_value, active_env)) |new_active_env| {
+                const fnkname = try swidy.fillFromEnv(fnkname_template, new_active_env);
+                const active_value = try swidy.fillFromEnv(template, new_active_env);
+
+                // TODO(now): generalize
+                if (swidy.isLit(fnkname, "@identity")) {
+                    debugger.active_value = active_value;
+                    const new_active_stack = swidy.buildPair(next, new_active_env);
+                    debugger.stack = swidy.buildPair(new_active_stack, rest_stack);
+                } else @panic("TODO");
+            } else {
+                const new_active_stack = swidy.buildPair(rest_cases, active_env);
+                debugger.stack = swidy.buildPair(new_active_stack, rest_stack);
+            }
+        } else if (!swidy.isNil(rest_stack)) {
+            debugger.stack = rest_stack;
+        }
+    }
+
+    // fn callFnk(debugger: *Debugger, fnkname: Swidy.Value) void {
+    //     const swidy = debugger.swidy;
+
+    //     const fnkname_body = swidy.envGet(fnkname, debugger.env) orelse swidy.buildString("nil");
+    //     assert(swidy.isList(fnkname_body));
+    //     debugger.next_cases = fnkname_body;
+    //     debugger.stack = swidy.buildString("nil");
+    // }
+};
+
+test "debugger again" {
+    var swidy: Swidy = .init(std.testing.allocator);
+    defer swidy.deinit();
+
+    var debugger: Debugger = .init(&swidy);
+
+    try debugger.testHelper(
+        \\ ("setActive" (
+        \\   (((("var" . "x") . ("lit" . "Z")) . ("var" . "x")) . (("lit" . "@identity") . ()))
+        \\   (((("var" . "x") . (("lit" . "S") . ("var" . "y"))) . ((("lit" . "S") . ("var" . "x")) . ("var" . "y"))) . (("lit" . "sum") . ()))
+        \\ ))
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("prependCase"
+        \\   ((("var" . "sum") . ("lit" . "nil")) . (("lit" . "@identity") . ()))
+        \\ )
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("runAll")
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("prependCase"
+        \\   ((("var" . "_") . ("var" . "sum")) . (("lit" . "@identity") . ()))
+        \\ )
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("runAll")
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("getActive")
+    ,
+        \\ (
+        \\   (((("var" . "x") . ("lit" . "Z")) . ("var" . "x")) . (("lit" . "@identity") . ()))
+        \\   (((("var" . "x") . (("lit" . "S") . ("var" . "y"))) . ((("lit" . "S") . ("var" . "x")) . ("var" . "y"))) . (("lit" . "sum") . ()))
+        \\ )
+    );
+}
+
+test "debugger" {
+    if (true) return error.SkipZigTest;
+
+    var swidy: Swidy = .init(std.testing.allocator);
+    defer swidy.deinit();
+
+    var debugger: Debugger = .init(&swidy);
+
+    try debugger.testHelper(
+        \\ ("set" "sum" (
+        \\   (((("var" . "x") . ("lit" . "Z")) . ("var" . "x")) . (("lit" . "@identity") . ()))
+        \\   (((("var" . "x") . (("lit" . "S") . ("var" . "y"))) . ((("lit" . "S") . ("var" . "x")) . ("var" . "y"))) . (("lit" . "sum") . ()))
+        \\ ))
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("lookup" "sum")
+    ,
+        \\ ("#found" . (
+        \\   (((("var" . "x") . ("lit" . "Z")) . ("var" . "x")) . (("lit" . "@identity") . ()))
+        \\   (((("var" . "x") . (("lit" . "S") . ("var" . "y"))) . ((("lit" . "S") . ("var" . "x")) . ("var" . "y"))) . (("lit" . "sum") . ()))
+        \\ ))
+    );
+
+    try debugger.testHelper(
+        \\ ("fill" ("var" . "sum"))
+    ,
+        \\ (
+        \\   (((("var" . "x") . ("lit" . "Z")) . ("var" . "x")) . (("lit" . "@identity") . ()))
+        \\   (((("var" . "x") . (("lit" . "S") . ("var" . "y"))) . ((("lit" . "S") . ("var" . "x")) . ("var" . "y"))) . (("lit" . "sum") . ()))
+        \\ )
+    );
+
+    try debugger.testHelper(
+        \\ ("fill" ("var" . "foo"))
+    ,
+        \\ "#error"
+    );
+
+    try debugger.testHelper(
+        \\ ("debug" "sum" (("S" . ("S" . "Z")) . ("S" . ("S" . "Z"))))
+    ,
+        \\ "#inert"
+    );
+
+    // try debugger.testHelper(
+    //     \\ ("see" "active_value")
+    // ,
+    //     \\ (("S" . ("S" . "Z")) . ("S" . ("S" . "Z")))
+    // );
+
+    // try debugger.testHelper(
+    //     \\ ("step")
+    // ,
+    //     \\ "#inert"
+    // );
+
+    // try debugger.testHelper(
+    //     \\ ("see" "active_value")
+    // ,
+    //     \\ (("S" . ("S" . "Z")) . ("S" . ("S" . "Z")))
+    // );
+
+    // try debugger.testHelper(
+    //     \\ ("see" "cases")
+    // ,
+    //     \\ (
+    //     \\   (((("var" . "x") . (("lit" . "S") . ("var" . "y"))) . ((("lit" . "S") . ("var" . "x")) . ("var" . "y"))) . (("lit" . "sum") . ()))
+    //     \\ )
+    // );
+
+    // try debugger.testHelper(
+    //     \\ ("step")
+    // ,
+    //     \\ "#inert"
+    // );
+
+    // try debugger.testHelper(
+    //     \\ ("see" "active_value")
+    // ,
+    //     \\ ("S" . ("S" . ("S" . ("S" . "Z"))))
+    // );
+
+    // try debugger.testHelper(
+    //     \\ ("see" "cases")
+    // ,
+    //     \\ ()
+    // );
+
+    // try debugger.testHelper(
+    //     \\ ("debug" "sum" (("S" . ("S" . "Z")) . ("S" . ("S" . "Z"))))
+    // ,
+    //     \\ "#inert"
+    // );
+
+    // try debugger.testHelper(
+    //     \\ ("step")
+    // ,
+    //     \\ "#inert"
+    // );
+
+    // try debugger.testHelper(
+    //     \\ ("see" "cases")
+    // ,
+    //     \\ (
+    //     \\   (((("var" . "x") . (("lit" . "S") . ("var" . "y"))) . ((("lit" . "S") . ("var" . "x")) . ("var" . "y"))) . (("lit" . "sum") . ()))
+    //     \\ )
+    // );
+
+    // try debugger.testHelper(
+    //     \\ ("step_into")
+    // ,
+    //     \\ "#inert"
+    // );
+
+    // const input, const fnkname, const all_fnks = blk: {
+    //     var asdf_reader: std.Io.Reader = .fixed(
+    //         \\(("sum" . (("S" . ("S" . "Z")) . ("S" . ("S" . "Z")))) . (
+    //         \\  ("sum" . (
+    //         \\    (((("var" . "x") . ("lit" . "Z")) . ("var" . "x")) . (("lit" . "@identity") . ()))
+    //         \\    (((("var" . "x") . (("lit" . "S") . ("var" . "y"))) . ((("lit" . "S") . ("var" . "x")) . ("var" . "y"))) . (("lit" . "sum") . ()))
+    //         \\  ))
+    //         \\))
+    //     );
+    //     const asdf = try Swidy.Parser.sexpr(&swidy, &asdf_reader);
+    //     const input = swidy.cr(asdf, &.{ .left, .right });
+    //     const fnkname = swidy.cr(asdf, &.{ .left, .left });
+    //     const all_fnks = swidy.cr(asdf, &.{.right});
+    //     break :blk .{ input, fnkname, all_fnks };
+    // };
+    // var debugger: Debugger =
+}
+
+pub const Editor = struct {
+    swidy: Swidy,
+    state: Swidy.Value,
+
+    pub fn initFromString(gpa: std.mem.Allocator, str: []const u8) !Editor {
+        var swidy: Swidy = .init(gpa);
+        var reader: std.Io.Reader = .fixed(str);
+        const doc = try Swidy.Parser.sexpr(&swidy, &reader);
+        return .{ .swidy = swidy, .state = doc };
+    }
+
+    test "foo" {
+        var editor: Editor = try .initFromString(std.testing.allocator, "()");
+        defer editor.swidy.deinit();
+
+        // command: create fnk
+        editor.sendLine("fnk");
+        // name of the fnk
+        editor.sendLine("sum");
+
+        editor.sendLine("newcase");
+        editor.sendLine("(x . \"Z\")");
+        editor.sendLine("@identity");
+        editor.sendLine("x");
+        editor.sendLine(";");
+
+        editor.sendLine("newcase");
+        editor.sendLine("(x . (\"S\" . rest))");
+        editor.sendLine("sum");
+        editor.sendLine("((\"S\" . x) . rest)");
+        editor.sendLine(";");
+
+        editor.sendLine("do");
+        editor.sendLine("sum");
+        editor.sendLine("(\"Z\" . \"Z\")");
+    }
+};
+
+// comptime {
+//     _ = Editor;
+// }
 
 // const source: std.io.Reader = .fixed(
 //     \\ fn myFunc {
