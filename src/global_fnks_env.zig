@@ -41,12 +41,28 @@ pub const Debugger = struct {
     stack: Swidy.Value,
 
     pub fn init(swidy: *Swidy) Debugger {
+        var env = swidy.buildString("nil");
+        env = swidy.envSet(swidy.buildString("@identity"), swidy.buildPair(
+            swidy.buildString("fnkbody"),
+            swidy.buildString("nil"),
+        ), env);
+        env = swidy.envSet(swidy.buildString("@eqAtoms?"), swidy.buildPair(
+            swidy.buildString("external"),
+            swidy.buildString(&std.mem.toBytes(&BuiltinFnks.@"eqAtoms?")),
+        ), env);
+        env = swidy.envSet(swidy.buildString("@join"), swidy.buildPair(
+            swidy.buildString("external"),
+            swidy.buildString(&std.mem.toBytes(&BuiltinFnks.join)),
+        ), env);
+        env = swidy.envSet(swidy.buildString("@split"), swidy.buildPair(
+            swidy.buildString("external"),
+            swidy.buildString(&std.mem.toBytes(&BuiltinFnks.split)),
+        ), env);
         return .{
             .swidy = swidy,
             .active_value = swidy.buildString("nil"),
-            .all_fnks = swidy.buildSexpr(
-                \\ ( ("@identity" . ()) )
-            ) catch unreachable,
+            .all_fnks = env,
+            // , .{std.mem.asBytes(&&BuiltinFnks.@"eqAtoms?")})) catch unreachable,
             .stack = swidy.buildString("nil"),
         };
     }
@@ -82,7 +98,8 @@ pub const Debugger = struct {
             const fnkbody = it.next() orelse return swidy.buildString("#error");
             if (it.next() != null) return swidy.buildString("#error");
 
-            debugger.all_fnks = swidy.envSet(fnkname, fnkbody, debugger.all_fnks);
+            const fnkdef = swidy.buildPair(swidy.buildString("fnkbody"), fnkbody);
+            debugger.all_fnks = swidy.envSet(fnkname, fnkdef, debugger.all_fnks);
 
             return swidy.buildString("#inert");
         } else if (swidy.isLit(command, "getFnk")) {
@@ -119,11 +136,18 @@ pub const Debugger = struct {
     fn call(debugger: *Debugger, fnkname: Swidy.Value) !void {
         const swidy = debugger.swidy;
 
-        const fnkbody = swidy.envGet(fnkname, debugger.all_fnks) orelse return error.UnknownFnk;
-        debugger.stack = swidy.buildPair(
-            swidy.buildPair(fnkbody, swidy.buildString("nil")),
-            debugger.stack,
-        );
+        const fnkdef = swidy.envGet(fnkname, debugger.all_fnks) orelse return error.UnknownFnk;
+        const kind, const fnkvalue = swidy.splitPair(fnkdef);
+        if (swidy.isLit(kind, "fnkbody")) {
+            debugger.stack = swidy.buildPair(
+                swidy.buildPair(fnkvalue, swidy.buildString("nil")),
+                debugger.stack,
+            );
+        } else if (swidy.isLit(kind, "external")) {
+            const ptr_bytes: []const u8 = swidy.get(fnkvalue).string;
+            const ptr: *const ExternalFnk = @ptrCast(std.mem.bytesToValue(*const ExternalFnk, ptr_bytes));
+            debugger.active_value = ptr(swidy, debugger.active_value);
+        } else return error.BadFnkDef;
     }
 
     fn step(debugger: *Debugger) !void {
@@ -180,10 +204,10 @@ test "debugger" {
     try debugger.testHelper(
         \\ ("getFnk" "sum")
     ,
-        \\ (
+        \\ ("fnkbody" . (
         \\   (((("var" . "x") . ("lit" . "Z")) . ("var" . "x")) . (("lit" . "@identity") . ()))
         \\   (((("var" . "x") . (("lit" . "S") . ("var" . "y"))) . ((("lit" . "S") . ("var" . "x")) . ("var" . "y"))) . (("lit" . "sum") . ()))
-        \\ )
+        \\ ))
     );
 
     try debugger.testHelper(
@@ -235,4 +259,139 @@ test "debugger" {
     );
 }
 
-// TODO: builtins
+test "builtins" {
+    var swidy: Swidy = .init(std.testing.allocator);
+    defer swidy.deinit();
+
+    var debugger: Debugger = .init(&swidy);
+
+    try debugger.testHelper(
+        \\ ("setActive" ("foo" . "foo"))
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("call" "@eqAtoms?")
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("getActive")
+    ,
+        \\ "true"
+    );
+
+    try debugger.testHelper(
+        \\ ("setActive" ("foo" . "bar"))
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("call" "@eqAtoms?")
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("getActive")
+    ,
+        \\ "false"
+    );
+
+    try debugger.testHelper(
+        \\ ("setActive" "foo")
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("call" "@split")
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("getActive")
+    ,
+        \\ ("f" "o" "o")
+    );
+
+    try debugger.testHelper(
+        \\ ("call" "@join")
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("getActive")
+    ,
+        \\ "foo"
+    );
+}
+
+const ExternalFnk = fn (swidy: *Swidy, value: Swidy.Value) callconv(.c) Swidy.Value;
+
+const BuiltinFnks = struct {
+    pub fn @"eqAtoms?"(swidy: *Swidy, value: Swidy.Value) callconv(.c) Swidy.Value {
+        const result = switch (swidy.get(value)) {
+            .string => false,
+            .pair => |pair| if (pair.left.tag == .string and pair.right.tag == .string) swidy.eql(pair.left, pair.right) else false,
+        };
+        return swidy.buildString(if (result) "true" else "false");
+    }
+
+    pub fn join(swidy: *Swidy, value: Swidy.Value) callconv(.c) Swidy.Value {
+        var builder = swidy.buildStringByParts();
+        var it = swidy.listIterator(value);
+        while (it.next()) |element| {
+            if (element.tag != .string) panic("unexpected non-string element: {f}", .{swidy.fmt(element)});
+            builder.add(swidy.get(element).string);
+        }
+        return builder.result;
+    }
+
+    pub fn split(swidy: *Swidy, value: Swidy.Value) callconv(.c) Swidy.Value {
+        if (value.tag != .string) panic("unexpected non-string argument: {f}", .{swidy.fmt(value)});
+        const string: Swidy.Value.String = swidy.slots_strings.items[value.index];
+
+        // TODO(correctness): remove artificial limit
+        var elements_buffer: [128]Swidy.Value = undefined;
+
+        var elements: std.ArrayList(Swidy.Value) = .initBuffer(&elements_buffer);
+        for (0..string.len) |k| {
+            const cur = swidy.createCell(.string);
+            swidy.slots_strings.items[cur.index] = .{ .start = @intCast(string.start + k), .len = 1 };
+            elements.appendBounded(cur) catch Swidy.OoM();
+        }
+
+        return swidy.buildList(elements.items, null);
+    }
+
+    // TODO: remove and change to "get fnk address"
+    pub fn dyncall(swidy: *Swidy, value: Swidy.Value) callconv(.c) Swidy.Value {
+        // a -> @dyncall: ((stdlib . example) . foo)
+        const path = swidy.get(swidy.cr(value, &.{ .left, .left })).string;
+        const fnkname = std.mem.concatWithSentinel(swidy.gpa, u8, &.{
+            swidy.get(swidy.cr(value, &.{ .left, .right })).string,
+        }, 0) catch Swidy.OoM();
+        defer swidy.gpa.free(fnkname);
+        const argument = swidy.cr(value, &.{.right});
+
+        var dynlib = std.DynLib.open(path) catch panic("error while opening dynlib {s}", .{path});
+        defer dynlib.close();
+
+        const Signature = fn (swidy: *Swidy, value: Swidy.Value) callconv(.c) Swidy.Value;
+        const fnk = dynlib.lookup(*const Signature, fnkname) orelse
+            panic("couldn't find fn {s} in dynlib {s}", .{ fnkname, path });
+
+        return fnk(swidy, argument);
+    }
+
+    // pub fn add_u8_u8(swidy: *Swidy, value: Swidy.Value) callconv(.c) Swidy.Value {
+    //     std.mem.readInt(comptime T: type, buffer: *const [?]u8, endian: Endian)
+    //     ...
+    // }
+};

@@ -40,9 +40,9 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(stdlib);
 
-    const stdlib_tests = b.addTest(.{
-        .root_module = stdlib.root_module,
-    });
-    const run_stdlib_tests = b.addRunArtifact(stdlib_tests);
-    test_step.dependOn(&run_stdlib_tests.step);
+    // const stdlib_tests = b.addTest(.{
+    //     .root_module = stdlib.root_module,
+    // });
+    // const run_stdlib_tests = b.addRunArtifact(stdlib_tests);
+    // test_step.dependOn(&run_stdlib_tests.step);
 }

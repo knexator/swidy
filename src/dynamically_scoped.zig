@@ -114,7 +114,7 @@ pub const Swidy = struct {
         }
     }
 
-    fn createCell(swidy: *Swidy, comptime tag: Tag) Value {
+    pub fn createCell(swidy: *Swidy, comptime tag: Tag) Value {
         const slots = switch (tag) {
             .pair => &swidy.slots_pairs,
             .string => &swidy.slots_strings,
