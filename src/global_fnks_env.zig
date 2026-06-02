@@ -62,7 +62,6 @@ pub const Debugger = struct {
             .swidy = swidy,
             .active_value = swidy.buildString("nil"),
             .all_fnks = env,
-            // , .{std.mem.asBytes(&&BuiltinFnks.@"eqAtoms?")})) catch unreachable,
             .stack = swidy.buildString("nil"),
         };
     }
@@ -93,6 +92,25 @@ pub const Debugger = struct {
             const value = debugger.active_value;
 
             return value;
+        } else if (swidy.isLit(command, "getAllFnks")) {
+            if (it.next() != null) return swidy.buildString("#error");
+
+            const value = swidy.envAllKeys(debugger.all_fnks);
+
+            return value;
+        } else if (swidy.isLit(command, "getStack")) {
+            if (it.next() != null) return swidy.buildString("#error");
+
+            const value = debugger.stack;
+
+            return value;
+        } else if (swidy.isLit(command, "setStack")) {
+            const value = it.next() orelse return swidy.buildString("#error");
+            if (it.next() != null) return swidy.buildString("#error");
+
+            debugger.stack = value;
+
+            return swidy.buildString("#inert");
         } else if (swidy.isLit(command, "addFnk")) {
             const fnkname = it.next() orelse return swidy.buildString("#error");
             const fnkbody = it.next() orelse return swidy.buildString("#error");

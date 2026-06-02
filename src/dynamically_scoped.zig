@@ -413,6 +413,20 @@ pub const Swidy = struct {
         return null;
     }
 
+    pub fn envAllKeys(swidy: *Swidy, env: Value) Value {
+        var elements: std.ArrayList(Value) = .empty;
+        defer elements.deinit(swidy.gpa);
+
+        var it = swidy.listIterator(env);
+        while (it.next()) |pair| {
+            const cur_key, const cur_value = swidy.splitPair(pair);
+            _ = cur_value;
+            elements.append(swidy.gpa, cur_key) catch OoM();
+        }
+
+        return swidy.buildList(elements.items, null);
+    }
+
     pub fn fillFromEnv(swidy: *Swidy, template: Value, env: Value) !Value {
         switch (swidy.get(template)) {
             .string => return error.BadTemplate,
