@@ -428,6 +428,7 @@ pub const Swidy = struct {
     }
 
     pub fn fillFromEnv(swidy: *Swidy, template: Value, env: Value) !Value {
+        errdefer std.log.err("some error for template {f} and env {f}", .{ swidy.fmt(template), swidy.fmt(env) });
         switch (swidy.get(template)) {
             .string => return error.BadTemplate,
             .pair => |template_pair| {

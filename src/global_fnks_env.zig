@@ -46,6 +46,10 @@ pub const Debugger = struct {
             swidy.buildString("fnkbody"),
             swidy.buildString("nil"),
         ), env);
+        env = swidy.envSet(swidy.buildString("@breakpoint"), swidy.buildPair(
+            swidy.buildString("fnkbody"),
+            swidy.buildString("nil"),
+        ), env);
         env = swidy.envSet(swidy.buildString("@eqAtoms?"), swidy.buildPair(
             swidy.buildString("external"),
             swidy.buildString(&std.mem.toBytes(&BuiltinFnks.@"eqAtoms?")),
@@ -70,7 +74,7 @@ pub const Debugger = struct {
         const in_value = try debugger.swidy.buildSexpr(in);
         const expected_out_value = try debugger.swidy.buildSexpr(expected_out);
         const out = debugger.do(in_value);
-        try debugger.swidy.expectEqual(expected_out_value, out);
+        try debugger.swidy.expectEqualAsStrings(expected_out_value, out, debugger.swidy.gpa);
     }
 
     pub fn do(debugger: *Debugger, in: Swidy.Value) Swidy.Value {
@@ -138,14 +142,15 @@ pub const Debugger = struct {
             if (it.next() != null) return swidy.buildString("#error");
 
             while (!swidy.isNil(debugger.stack)) {
-                debugger.step() catch return swidy.buildString("#error");
+                const hit_breakpoint = debugger.step() catch return swidy.buildString("#error");
+                if (hit_breakpoint) break;
             }
 
             return swidy.buildString("#inert");
         } else if (swidy.isLit(command, "step")) {
             if (it.next() != null) return swidy.buildString("#error");
 
-            debugger.step() catch return swidy.buildString("#error");
+            _ = debugger.step() catch return swidy.buildString("#error");
 
             return swidy.buildString("#inert");
         } else return swidy.buildString("#error");
@@ -168,7 +173,8 @@ pub const Debugger = struct {
         } else return error.BadFnkDef;
     }
 
-    fn step(debugger: *Debugger) !void {
+    /// returns true if it hit a breakpoint
+    fn step(debugger: *Debugger) !bool {
         const swidy = debugger.swidy;
 
         if (!swidy.isNil(debugger.stack)) {
@@ -193,6 +199,7 @@ pub const Debugger = struct {
                         rest_stack,
                     );
                     try debugger.call(fnkname);
+                    return swidy.isLit(fnkname, "@breakpoint");
                 } else {
                     const new_active_stack = swidy.buildPair(rest_cases, active_env);
                     debugger.stack = swidy.buildPair(new_active_stack, rest_stack);
@@ -201,8 +208,137 @@ pub const Debugger = struct {
                 debugger.stack = rest_stack;
             }
         }
+
+        return false;
     }
 };
+
+test "editor" {
+    var swidy: Swidy = .init(std.testing.allocator);
+    defer swidy.deinit();
+
+    var debugger: Debugger = .init(&swidy);
+
+    try debugger.testHelper(
+        \\ ("addFnk" "setAt" (
+        \\   (((("var" . "value") ("lit" . "nil") ("var" . "newpart") . ("lit" . "nil")) . ("var" . "newpart")) . (("lit" . "@identity") . ()))
+        \\   ((((("var" . "value_left") . ("var" . "value_right")) (("lit" . "left") . ("var" . "rest")) ("var" . "newpart") . ("lit" . "nil")) . 
+        \\       (("var" . "value_left") ("var" . "rest") ("var" . "newpart") . ("lit" . "nil"))) . (("lit" . "setAt") . (
+        \\           ((("var" . "newvalue") . (("var" . "newvalue") . ("var" . "value_right"))) . (("lit" . "@identity") . ()))
+        \\   )))
+        \\   ((((("var" . "value_left") . ("var" . "value_right")) (("lit" . "right") . ("var" . "rest")) ("var" . "newpart") . ("lit" . "nil")) . 
+        \\       (("var" . "value_right") ("var" . "rest") ("var" . "newpart") . ("lit" . "nil"))) . (("lit" . "setAt") . (
+        \\           ((("var" . "newvalue") . (("var" . "value_left") . ("var" . "newvalue"))) . (("lit" . "@identity") . ()))
+        \\   )))
+        \\   ((("var" . "other") . ("lit" . "bad args!")) . (("lit" . "@identity") . ()))
+        \\ ))
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("setActive" (("foo" "bar" "baz") ("right" "left") "xxx"))
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("call" "setAt")
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("runAll")
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("getActive")
+    ,
+        \\ ("foo" "xxx" "baz")
+    );
+
+    try debugger.testHelper(
+        \\ ("addFnk" "getAt" (
+        \\   (((("var" . "value") . ("lit" . "nil")) . ("var" . "value")) . (("lit" . "@identity") . ()))
+        \\   ((((("var" . "value_left") . ("var" . "value_right")) . (("lit" . "left") . ("var" . "rest"))) . 
+        \\       (("var" . "value_left") . ("var" . "rest"))) . (("lit" . "getAt") . ()))
+        \\   ((((("var" . "value_left") . ("var" . "value_right")) . (("lit" . "right") . ("var" . "rest"))) . 
+        \\       (("var" . "value_right") . ("var" . "rest"))) . (("lit" . "getAt") . ()))
+        \\   ((("var" . "other") . ("lit" . "bad args!")) . (("lit" . "@identity") . ()))
+        \\ ))
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("addFnk" "dynamicChangeAt" (
+        \\   (((("var" . "value") . ("var" . "address")) . (("var" . "value") . ("var" . "address"))) . (("lit" . "getAt") . (
+        \\       ((("var" . "old_value") . ("var" . "old_value")) . (("lit" . "@breakpoint") . (
+        \\            ((("var" . "new_value") . (("var" . "value") ("var" . "address") ("var" . "new_value") . ("lit" . "nil"))) . (("lit" . "setAt") . ()))
+        \\       )))
+        \\   )))
+        \\ ))
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("setActive" (("foo" "bar" "baz") . ("right" "left")))
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("call" "dynamicChangeAt")
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("runAll")
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("getActive")
+    ,
+        \\ "bar"
+    );
+
+    try debugger.testHelper(
+        \\ ("setActive" "xxx")
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("runAll")
+    ,
+        \\ "#inert"
+    );
+
+    try debugger.testHelper(
+        \\ ("getActive")
+    ,
+        \\ ("foo" "xxx" "baz")
+    );
+
+    // _ =
+    //     \\ changeAtDynamic {
+    //     \\   ( address . ( activeValue . _ ) -> getAt: (address . activeValue) {
+    //     \\       old_value -> debugStop: old_value { // user should now setActiveValue
+    //     \\           new_value -> setAt: (address . new_value) {
+    //     \\              foo -> setActiveValue: foo;
+    //     \\           }
+    //     \\      }
+    //     \\   }
+    //     \\ }
+    // ;
+}
 
 test "debugger" {
     var swidy: Swidy = .init(std.testing.allocator);
