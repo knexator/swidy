@@ -24,7 +24,8 @@ External functions are inspired by Lua, and must take a pointer to a `Swidy` ins
 
 The `swidy` executable is a debugger; TODO: instructions
 
-There are 3 versions of the language, the three practical ways of defining recursive functions:
+Of the three practical ways of defining recursive functions:
 - dynamically scoped variables
 - mutable environments
 - global environment only for functions
+the language uses the last one.

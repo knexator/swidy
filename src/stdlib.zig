@@ -1,4 +1,4 @@
-const Swidy = @import("main.zig").Swidy;
+const Swidy = @import("core.zig").Swidy;
 const std = @import("std");
 
 export fn example(swidy: *Swidy, value: Swidy.Value) callconv(.c) Swidy.Value {
