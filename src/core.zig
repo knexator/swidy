@@ -280,7 +280,7 @@ pub const Swidy = struct {
             return false;
         }
 
-        fn eatSexpr(swidy: *Swidy, reader: *std.Io.Reader, mode: enum { tree, explicit }) !Value {
+        pub fn eatSexpr(swidy: *Swidy, reader: *std.Io.Reader, mode: enum { tree, explicit }) !Value {
             try whitespace(reader, false);
             if (try eat(reader, "(")) {
                 // TODO(correctness): remove artificial limit

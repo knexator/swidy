@@ -4,6 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const lsp = b.dependency("lsp_kit", .{}).module("lsp");
+
     const exe = b.addExecutable(.{
         .name = "swidy",
         .root_module = b.createModule(.{
@@ -12,6 +14,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    exe.root_module.addImport("lsp", lsp);
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run the app");

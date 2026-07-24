@@ -3,7 +3,12 @@
     .version = "0.0.0",
     .fingerprint = 0xe1f662b35e387f6a, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .lsp_kit = .{
+            .url = "git+https://github.com/zigtools/lsp-kit.git?ref=0.16.x#cf0ff08ac00301859656bbd4a5af6fcb889497e4",
+            .hash = "lsp_kit-0.1.0-bi_PL8cxDAAxREwBYHZFTGG2xVuzAjgnZPMmwiajkFu0",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

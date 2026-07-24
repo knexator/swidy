@@ -82,7 +82,7 @@ fn cmd_debug(gpa: std.mem.Allocator, io: std.Io) !void {
     while (true) {
         try stdout.print("> ", .{});
         try stdout.flush();
-        const in = try Swidy.Parser.sexpr(&swidy, stdin);
+        const in = try Swidy.Parser.eatSexpr(&swidy, stdin, .explicit);
         const out = debugger.do(in);
         try stdout.print("{f}\n", .{swidy.fmt(out)});
     }
