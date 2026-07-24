@@ -130,7 +130,7 @@ pub const Swidy = struct {
     pub fn buildSexpr(swidy: *Swidy, str: []const u8) !Value {
         errdefer std.log.err("failed to build sexpr for input {s}", .{str});
         var reader: std.Io.Reader = .fixed(str);
-        const result = try Parser.sexpr(swidy, &reader);
+        const result = try Parser.eatSexpr(swidy, &reader, .explicit);
         try Parser.whitespace(&reader, false);
         if (reader.bufferedLen() > 0) return error.MoreThanOneSexpr;
         return result;
@@ -257,7 +257,7 @@ pub const Swidy = struct {
             } else return false;
         }
 
-        fn whitespace(reader: *std.Io.Reader, mandatory: bool) !void {
+        pub fn whitespace(reader: *std.Io.Reader, mandatory: bool) !void {
             var seen_any: bool = false;
             while (blk: {
                 const b = reader.peekByte() catch |err| switch (err) {
@@ -272,34 +272,15 @@ pub const Swidy = struct {
             if (mandatory and !seen_any) return error.BadInput;
         }
 
-        // fn fnk(swidy: *Swidy, reader: *std.Io.Reader) !Index {
-        //     if (std.mem.eql(u8, "fn", ))
-        // }
+        pub fn atEnd(reader: *std.Io.Reader) !bool {
+            _ = reader.peekByte() catch |err| switch (err) {
+                error.EndOfStream => return true,
+                inline else => |x| return x,
+            };
+            return false;
+        }
 
-        // fn tree(swidy: *Swidy, reader: *std.Io.Reader) !Value {
-        //     try whitespace(reader, false);
-        //     if (reader.peekByte() == '(') {
-        //         @panic("TODO");
-        //     } else if (reader.peekByte() == '"') {
-        //         const literal = swidy.buildString(try reader.takeDelimiter('"'));
-        //         return swidy.buildPair(swidy.buildString("lit"), literal);
-        //     } else {
-        //         @panic("TODO");
-        //     }
-        // }
-
-        pub fn sexpr(swidy: *Swidy, reader: *std.Io.Reader) !Value {
-            const readHexDigit = struct {
-                fn anon(c: u8) ?u8 {
-                    return switch (c) {
-                        '0'...'9' => c - '0',
-                        'a'...'f' => c - 'a' + 10,
-                        'A'...'F' => c - 'A' + 10,
-                        else => null,
-                    };
-                }
-            }.anon;
-
+        fn eatSexpr(swidy: *Swidy, reader: *std.Io.Reader, mode: enum { tree, explicit }) !Value {
             try whitespace(reader, false);
             if (try eat(reader, "(")) {
                 // TODO(correctness): remove artificial limit
@@ -313,24 +294,100 @@ pub const Swidy = struct {
                     if (try eat(reader, ")")) {
                         break;
                     } else if (try eat(reader, ".")) {
-                        sentinel = try sexpr(swidy, reader);
+                        sentinel = try eatSexpr(swidy, reader, mode);
                         try whitespace(reader, false);
                         try expect(reader, ")");
                         break;
                     } else {
-                        elements.appendBounded(try sexpr(swidy, reader)) catch OoM();
+                        elements.appendBounded(try eatSexpr(swidy, reader, mode)) catch OoM();
                     }
                 }
 
-                return swidy.buildList(elements.items, sentinel);
-            } else if (try eat(reader, "\"")) {
+                return swidy.buildList(elements.items, if (mode == .tree)
+                    sentinel orelse swidy.buildPair(swidy.buildString("lit"), swidy.buildString("nil"))
+                else
+                    sentinel);
+            } else {
+                const word = try eatWord(swidy, reader);
+                if (mode == .explicit and !word.quoted) return error.BadInput;
+                if (mode == .tree) return swidy.buildPair(swidy.buildString(if (word.quoted) "lit" else "var"), word.value);
+                return word.value;
+            }
+        }
+
+        pub fn eatFnk(swidy: *Swidy, reader: *std.Io.Reader) !Value {
+            const fnkname = try eatSexpr(swidy, reader, .explicit);
+            const fnkbody = try eatCases(swidy, reader);
+            return swidy.buildPair(fnkname, swidy.buildPair(
+                swidy.buildString("fnkbody"),
+                fnkbody,
+            ));
+        }
+
+        fn eatCases(swidy: *Swidy, reader: *std.Io.Reader) !Value {
+            try whitespace(reader, false);
+            try expect(reader, "{");
+
+            // TODO(correctness): remove artificial limit
+            var cases_buffer: [128]Value = undefined;
+            var cases: std.ArrayList(Value) = .initBuffer(&cases_buffer);
+
+            try whitespace(reader, false);
+            while (!try eat(reader, "}")) {
+                const pattern = try eatSexpr(swidy, reader, .tree);
+
+                try whitespace(reader, false);
+                try expect(reader, "->");
+
+                const fnkname_or_template = try eatSexpr(swidy, reader, .tree);
+                try whitespace(reader, false);
+
+                const fnkname, const template = if (try eat(reader, ":"))
+                    .{ fnkname_or_template, try eatSexpr(swidy, reader, .tree) }
+                else
+                    .{ swidy.buildPair(swidy.buildString("lit"), swidy.buildString("@identity")), fnkname_or_template };
+
+                try whitespace(reader, false);
+
+                const nested = if (try eat(reader, ";"))
+                    swidy.buildString("nil")
+                else
+                    try eatCases(swidy, reader);
+
+                try cases.appendBounded(swidy.buildPair(
+                    swidy.buildPair(pattern, template),
+                    swidy.buildPair(fnkname, nested),
+                ));
+
+                try whitespace(reader, false);
+            }
+
+            return swidy.buildList(cases.items, null);
+        }
+
+        fn eatWord(swidy: *Swidy, reader: *std.Io.Reader) !struct { quoted: bool, value: Value } {
+            const readHexDigit = struct {
+                fn anon(c: u8) ?u8 {
+                    return switch (c) {
+                        '0'...'9' => c - '0',
+                        'a'...'f' => c - 'a' + 10,
+                        'A'...'F' => c - 'A' + 10,
+                        else => null,
+                    };
+                }
+            }.anon;
+
+            const word_borders = "(){}.:;\"<>" ++ std.ascii.whitespace;
+
+            try whitespace(reader, false);
+            if (try eat(reader, "\"")) { // read a quoted value
                 var builder = swidy.buildStringByParts();
-                while (true) {
+                const result = blk: while (true) {
                     const b = try reader.takeByte();
 
                     switch (b) {
                         '\n' => return error.BadInput,
-                        '"' => return builder.result,
+                        '"' => break :blk builder.result,
                         '\\' => switch (try reader.takeByte()) {
                             // TODO?
                             // 'n',
@@ -348,16 +405,22 @@ pub const Swidy = struct {
                         },
                         else => builder.add(&.{b}),
                     }
-                }
-                // return swidy.buildString(try reader.takeDelimiter('"') orelse return error.BadInput);
-            } else {
-                // // TODO(correctness): remove artificial limit
-                // var string_buffer: [512]u8 = undefined;
-
-                // var string: std.ArrayList(u8) = .initBuffer(&string_buffer);
-                // string.
-                return error.BadInput;
-            }
+                };
+                return .{ .quoted = true, .value = result };
+            } else if (std.mem.indexOfScalar(u8, word_borders, try reader.peekByte()) == null) {
+                var builder = swidy.buildStringByParts();
+                const result = blk: while (true) {
+                    if (try atEnd(reader)) break :blk builder.result;
+                    const b = try reader.peekByte();
+                    if (std.mem.indexOfScalar(u8, word_borders, b) != null) {
+                        break :blk builder.result;
+                    } else {
+                        reader.toss(1);
+                        builder.add(&.{b});
+                    }
+                };
+                return .{ .quoted = false, .value = result };
+            } else return error.BadInput;
         }
     };
 
@@ -465,9 +528,26 @@ pub const Swidy = struct {
             var source: std.Io.Reader = .fixed(test_case[0]);
             try swidy.expectEqual(
                 test_case[1],
-                try Swidy.Parser.sexpr(&swidy, &source),
+                try Swidy.Parser.eatSexpr(&swidy, &source, .explicit),
             );
         }
+    }
+
+    test "fnk parsing" {
+        var swidy: Swidy = .init(std.testing.allocator);
+        defer swidy.deinit();
+
+        const text =
+            \\"sum" {
+            \\  ("+1" . y) -> ("foo" . y): ("z" . x);
+            \\  ("+2" . y) -> ("foo" . y): ("z" . x) {
+            \\    ("+1" . y) -> ("z" . x);
+            \\  }
+            \\}
+            \\
+        ;
+        var source: std.Io.Reader = .fixed(text);
+        _ = try Parser.eatFnk(&swidy, &source);
     }
 };
 
@@ -594,7 +674,13 @@ pub const Debugger = struct {
         } else return swidy.buildString("#error");
     }
 
-    fn call(debugger: *Debugger, fnkname: Swidy.Value) !void {
+    pub fn runAllWithoutBreakpoints(debugger: *Debugger) !void {
+        while (!debugger.swidy.isNil(debugger.stack)) {
+            _ = try debugger.step();
+        }
+    }
+
+    pub fn call(debugger: *Debugger, fnkname: Swidy.Value) !void {
         const swidy = debugger.swidy;
 
         const fnkdef = swidy.envGet(fnkname, debugger.all_fnks) orelse return error.UnknownFnk;
@@ -612,7 +698,7 @@ pub const Debugger = struct {
     }
 
     /// returns true if it hit a breakpoint
-    fn step(debugger: *Debugger) !bool {
+    pub fn step(debugger: *Debugger) !bool {
         const swidy = debugger.swidy;
 
         if (!swidy.isNil(debugger.stack)) {
@@ -649,7 +735,53 @@ pub const Debugger = struct {
 
         return false;
     }
+
+    pub fn addFnks(debugger: *Debugger, reader: *std.Io.Reader) !void {
+        try Swidy.Parser.whitespace(reader, false);
+        while (!try Swidy.Parser.atEnd(reader)) {
+            const another = try Swidy.Parser.eatFnk(debugger.swidy, reader);
+            debugger.all_fnks = debugger.swidy.buildPair(another, debugger.all_fnks);
+            try Swidy.Parser.whitespace(reader, false);
+        }
+    }
 };
+
+test "run" {
+    const code =
+        \\ "sum" {
+        \\     ("nil" . y) -> "@identity": y;
+        \\     (("+1" . x) . y) -> "sum": (x . ("+1" . y));
+        \\ }
+        \\ "mul" {
+        \\     ("nil" . y) -> "@identity": "nil";
+        \\     (("+1" . x) . y) -> "mul": (x . y) {
+        \\         x_times_y -> "sum": (x_times_y  . y);
+        \\     }
+        \\ }
+        \\ "main" {
+        \\     _ -> "mul": (
+        \\         ("+1" "+1")
+        \\         .
+        \\         ("+1" "+1" "+1")
+        \\     );
+        \\ }
+    ;
+    const expected =
+        \\ ("+1" "+1" "+1" "+1" "+1" "+1")
+    ;
+
+    var swidy: Swidy = .init(std.testing.allocator);
+    defer swidy.deinit();
+
+    var debugger: Debugger = .init(&swidy);
+    var source: std.Io.Reader = .fixed(code);
+    try debugger.addFnks(&source);
+    try debugger.call(swidy.buildString("main"));
+    try debugger.runAllWithoutBreakpoints();
+
+    const expected_value = try debugger.swidy.buildSexpr(expected);
+    try debugger.swidy.expectEqualAsStrings(expected_value, debugger.active_value, debugger.swidy.gpa);
+}
 
 test "editor" {
     var swidy: Swidy = .init(std.testing.allocator);
