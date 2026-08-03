@@ -99,6 +99,7 @@ pub const Swidy = struct {
     };
 
     pub fn get(swidy: *const Swidy, value: Value) union(enum) {
+        // TODO: this return value can be invalidated easily, so maybe this API should be removed/improved?
         string: []const u8,
         pair: struct { left: Value, right: Value },
     } {
@@ -173,6 +174,15 @@ pub const Swidy = struct {
             assert(builder.result.tag == .string);
             const string = &builder.swidy.slots_strings.items[builder.result.index];
             assert(string.start + string.len == builder.swidy.strings.items.len);
+            // if 'part' is a pointer into swidy.strings,
+            // and there is not enough room without growing it,
+            // panic instead of silently invalidating 'part'
+            if (builder.swidy.strings.unusedCapacitySlice().len < part.len and
+                @intFromPtr(builder.swidy.strings.items.ptr) <= @intFromPtr(part.ptr) and
+                @intFromPtr(part.ptr) < (@intFromPtr(builder.swidy.strings.items.ptr) + builder.swidy.strings.items.len))
+            {
+                panic("appending might invalidate 'part'; ensure there is enough capacity in swidy.strings before calling add", .{});
+            }
             builder.swidy.strings.appendSlice(builder.swidy.gpa, part) catch OoM();
             string.len = std.math.cast(u32, @as(usize, string.len) + part.len) orelse OoM();
         }
@@ -1068,10 +1078,18 @@ const BuiltinFnks = struct {
     }
 
     pub fn join(swidy: *Swidy, value: Swidy.Value) callconv(.c) Swidy.Value {
+        // ensure swidy.strings has enough capacity for all the parts
+        var total: usize = 0;
+        var pre_it = swidy.listIterator(value);
+        while (pre_it.next()) |element| {
+            if (element.tag != .string) panic("unexpected non-string element: {f}", .{swidy.fmt(element)});
+            total += swidy.get(element).string.len;
+        }
+        swidy.strings.ensureUnusedCapacity(swidy.gpa, total) catch Swidy.OoM();
+
         var builder = swidy.buildStringByParts();
         var it = swidy.listIterator(value);
         while (it.next()) |element| {
-            if (element.tag != .string) panic("unexpected non-string element: {f}", .{swidy.fmt(element)});
             builder.add(swidy.get(element).string);
         }
         return builder.result;
